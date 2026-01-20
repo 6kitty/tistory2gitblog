@@ -98,28 +98,37 @@ class BlogBackupCore:
             self.driver = None
 
     def get_post_list(self):
-        """관리자 페이지 글 목록 전체 스크래핑 (페이지네이션 포함)"""
+        """관리자 페이지 글 목록 전체 스크래핑 (페이지 번호 기반 순차 이동)"""
         if not self.driver: self.start_browser()
         
+        # 1. 관리자 페이지 접속
         manage_url = f"https://{TISTORY_BLOG_NAME}.tistory.com/manage/posts"
         self.driver.get(manage_url)
         time.sleep(2)
 
         all_posts = []
-        page_num = 1
+        current_page = 1 # 1페이지부터 시작
 
         while True:
-            print(f"📄 {page_num}페이지 스캔 중...")
+            print(f"📄 {current_page}페이지 스캔 중... (현재 수집: {len(all_posts)}개)")
             
-            # 현재 페이지 파싱
+            # 페이지 로딩 대기 (게시글 목록이 뜰 때까지)
+            try:
+                WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "ul.list_post"))
+                )
+            except:
+                print("⚠️ 게시글 목록 로딩 시간 초과")
+                break
+
+            # --- 현재 페이지 게시글 파싱 ---
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
             items = soup.select('ul.list_post li')
             
             if not items:
-                print("⚠️ 글 목록 없음 (스킨/구조 확인 필요)")
+                print("🏁 게시글이 더 이상 없습니다.")
                 break
 
-            current_page_count = 0
             for item in items:
                 try:
                     link_tag = item.select_one('a.link_cont') or item.select_one('a.link_title')
@@ -150,34 +159,51 @@ class BlogBackupCore:
                         "date": date_str,
                         "status": status
                     })
-                    current_page_count += 1
                 except: pass
             
-            print(f"  └ {current_page_count}개 글 발견.")
-
-            # [수정된 부분] 다음 페이지 이동 로직
+            # --- [핵심 수정] 다음 페이지(current_page + 1) 링크 찾기 ---
+            next_page = current_page + 1
+            found_next_link = False
+            
             try:
-                # 제공해주신 HTML: <a class="link_paging ..."><span class="ico_blog ico_next">다음 페이지</span></a>
-                # XPath: ico_next 클래스를 가진 span을 포함하는 a 태그 찾기
-                next_btn_candidates = self.driver.find_elements(By.XPATH, "//a[contains(@class, 'link_paging') and .//span[contains(@class, 'ico_next')]]")
+                # 1. 모든 페이징 링크(숫자, 다음 버튼 등)를 가져옴
+                paging_links = self.driver.find_elements(By.CSS_SELECTOR, ".list_paging a, .link_paging")
                 
-                if next_btn_candidates:
-                    next_btn = next_btn_candidates[0]
-                    # href 속성이 있어야 클릭 가능 (없으면 '이전 페이지 없음' 처럼 비활성 상태)
-                    if next_btn.get_attribute("href"):
-                        # 화면 스크롤 및 JS 클릭 (가장 안전한 방법)
-                        self.driver.execute_script("arguments[0].scrollIntoView();", next_btn)
-                        self.driver.execute_script("arguments[0].click();", next_btn)
-                        time.sleep(2.5) # 페이지 로딩 대기
-                        page_num += 1
-                    else:
-                        print("🏁 마지막 페이지 도달 (버튼 비활성).")
-                        break
+                target_link = None
+                
+                # 2. 링크들을 하나씩 검사해서 href에 "page={next_page}"가 있는지 확인
+                for link in paging_links:
+                    href = link.get_attribute("href")
+                    if href and f"page={next_page}" in href:
+                        # "page=15"를 찾는데 "page=151"이 걸리지 않도록 정규식 검사 권장되나,
+                        # 티스토리 URL 구조상 &page=값& 형태이므로 단순 포함 여부도 꽤 정확함.
+                        # 더 정확히 하려면:
+                        if re.search(f"[?&]page={next_page}(&|$)", href):
+                            target_link = link
+                            break
+                
+                # 3. 목표 링크 클릭
+                if target_link:
+                    # 화면 스크롤 (버튼이 가려져 있을 수 있음)
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_link)
+                    time.sleep(0.5)
+                    
+                    # JS로 강제 클릭 (가장 확실함)
+                    self.driver.execute_script("arguments[0].click();", target_link)
+                    
+                    print(f"➡️  {next_page}페이지로 이동합니다...")
+                    time.sleep(2.5) # 페이지 로딩 대기
+                    current_page += 1
+                    found_next_link = True
                 else:
-                    print("🏁 더 이상 '다음' 버튼이 없습니다.")
+                    print(f"🏁 {next_page}페이지 링크를 찾을 수 없습니다. (마지막 페이지)")
                     break
+                    
             except Exception as e:
-                print(f"페이지 이동 에러(종료): {e}")
+                print(f"❌ 페이지 이동 중 에러 발생: {e}")
+                break
+                
+            if not found_next_link:
                 break
 
         print(f"📊 총 {len(all_posts)}개의 글을 수집했습니다.")
